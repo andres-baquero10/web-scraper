@@ -17,12 +17,7 @@ class Filter(StrEnum):
 
 
 def _sort_key(value: int | None, rank: int) -> tuple[bool, int, int]:
-    """Sort key: highest value first, None last, ties broken by lowest rank.
-
-    Tuples compare element by element: False sorts before True, so entries
-    with a value come before those without; negating the value puts the
-    highest first; the rank settles ties.
-    """
+    """Sort key: highest value first, None last, ties broken by lowest rank."""
     has_no_value = value is None
     return (has_no_value, -(value or 0), rank)
 
