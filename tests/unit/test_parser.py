@@ -55,6 +55,10 @@ def test_result_entries_are_a_tuple(front_page: ParseResult) -> None:
     assert isinstance(front_page.entries, tuple)
 
 
+def test_real_capture_skips_no_rows(front_page: ParseResult) -> None:
+    assert front_page.skipped == 0
+
+
 _STORY_ROW = (
     '<tr class="athing submission" id="{id}"><td class="title">'
     '<span class="rank">{rank}.</span></td><td class="title">'
@@ -74,7 +78,7 @@ def _page(*rows: str) -> str:
     return "<table>" + "".join(rows) + "</table>"
 
 
-def test_story_missing_its_subtext_row_is_an_error_not_a_job_post() -> None:
+def test_story_missing_its_subtext_row_is_skipped_not_a_job_post() -> None:
     # The next <tr> is the spacer: it has no score and no comments link, so
     # reading it would make the story look like a job post.
     html = _page(
@@ -83,19 +87,20 @@ def test_story_missing_its_subtext_row_is_an_error_not_a_job_post() -> None:
         _STORY_ROW.format(id=2, rank=2),
         _SUBTEXT_ROW.format(id=2),
     )
-    with pytest.raises(ValueError, match="missing subtext row"):
-        parse(html)
+    result = parse(html)
+    assert [e.id for e in result.entries] == [2]
+    assert result.skipped == 1
 
 
-def test_story_as_last_row_is_an_error() -> None:
-    with pytest.raises(ValueError, match="missing subtext row"):
-        parse(_page(_STORY_ROW.format(id=1, rank=1)))
+def test_story_as_last_row_is_skipped() -> None:
+    result = parse(_page(_STORY_ROW.format(id=1, rank=1)))
+    assert result == ParseResult(entries=(), skipped=1)
 
 
-def test_missing_id_is_a_value_error_not_a_key_error() -> None:
+def test_missing_id_is_skipped() -> None:
     story = _STORY_ROW.format(id=1, rank=1).replace(' id="1"', "", 1)
-    with pytest.raises(ValueError, match="missing id"):
-        parse(_page(story, _SUBTEXT_ROW.format(id=1)))
+    result = parse(_page(story, _SUBTEXT_ROW.format(id=1)))
+    assert result == ParseResult(entries=(), skipped=1)
 
 
 def test_job_post_subtext_row_is_still_accepted() -> None:
@@ -133,3 +138,88 @@ def test_comment_link_is_recognised_by_its_text(
 )
 def test_points_text(text: str, expected: int | None) -> None:
     assert parse_points(text) == expected
+
+
+# --- Edge cases -------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def edge_cases() -> ParseResult:
+    return parse((FIXTURES / "edge_cases.html").read_text(encoding="utf-8"))
+
+
+def _by_rank(result: ParseResult, rank: int) -> Entry:
+    (entry,) = (e for e in result.entries if e.number == rank)
+    return entry
+
+
+def test_job_post_has_null_points_and_comments(edge_cases: ParseResult) -> None:
+    # Its only item?id= link is the age link ("3 hours ago"), which must not
+    # be read as a comment count.
+    assert _by_rank(edge_cases, 2) == Entry(
+        number=2,
+        id=1002,
+        title="Acme (YC S21) Is Hiring Backend Engineers",
+        points=None,
+        comments=None,
+    )
+
+
+def test_discuss_counts_as_zero_comments(edge_cases: ParseResult) -> None:
+    entry = _by_rank(edge_cases, 3)
+    assert (entry.points, entry.comments) == (5, 0)
+
+
+def test_singular_point_and_comment(edge_cases: ParseResult) -> None:
+    entry = _by_rank(edge_cases, 4)
+    assert (entry.points, entry.comments) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("rank", "title"),
+    [
+        (1, "This is - a self-explained example"),
+        (5, '<script>alert(1)</script> & "friends"'),
+        (6, "Café в Москве 🚀 — C++ $100 3.5"),
+        (7, "Ask HN:   Spaced\xa0\xa0out   title"),
+    ],
+)
+def test_unusual_titles_are_decoded_unchanged(
+    edge_cases: ParseResult, rank: int, title: str
+) -> None:
+    assert _by_rank(edge_cases, rank).title == title
+
+
+def test_malformed_row_is_skipped(edge_cases: ParseResult) -> None:
+    ranks = {e.number for e in edge_cases.entries}
+    assert edge_cases.skipped == 1
+    assert 8 not in ranks
+    assert {7, 9} <= ranks
+
+
+def test_only_the_first_30_rows_are_parsed(edge_cases: ParseResult) -> None:
+    # 32 rows, rank 8 malformed: the cut happens before parsing, so rank 31
+    # (page 2 material) never fills the gap left by rank 8.
+    ranks = [e.number for e in edge_cases.entries]
+    assert ranks == [r for r in range(1, 31) if r != 8]
+    assert len(edge_cases.entries) == 29
+
+
+def test_more_than_30_valid_rows_are_truncated_to_30() -> None:
+    rows = [
+        _STORY_ROW.format(id=i, rank=i) + _SUBTEXT_ROW.format(id=i)
+        for i in range(1, 33)
+    ]
+    result = parse(_page(*rows))
+    assert [e.number for e in result.entries] == list(range(1, 31))
+    assert result.skipped == 0
+
+
+@pytest.mark.parametrize("html", ["", "<html><body>Sorry.</body></html>"])
+def test_page_without_rows_gives_zero_entries_not_an_exception(html: str) -> None:
+    assert parse(html) == ParseResult(entries=(), skipped=0)
+
+
+def test_page_where_every_row_is_malformed_gives_zero_entries() -> None:
+    html = _page(*(_STORY_ROW.format(id=i, rank=i) + _SPACER_ROW for i in (1, 2, 3)))
+    assert parse(html) == ParseResult(entries=(), skipped=3)

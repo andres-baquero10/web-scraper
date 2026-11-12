@@ -1,5 +1,6 @@
 """Turn the HN front-page HTML into entries"""
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -13,19 +14,44 @@ _POINTS_RE = re.compile(r"(\d+)\s+points?")
 _COMMENTS_RE = re.compile(r"(\d+)\s+comments?")
 _DISCUSS = "discuss"
 
+MAX_ENTRIES = 30
+"""The front page shows 30 entries; any rows beyond that are ignored."""
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ParseResult:
-    """Entries parsed from one page, in page order."""
+    """Entries parsed from one page, in page order.
+
+    ``entries`` may be empty (layout change, error page); the parser reports
+    that as a result and leaves it to the caller to treat it as a failure.
+    """
 
     entries: tuple[Entry, ...]
+    skipped: int = 0
+    """Rows among the first ``MAX_ENTRIES`` that failed to parse."""
 
 
 def parse(html: str) -> ParseResult:
-    """Parse every entry row on the front page."""
+    """
+    Parse entry rows on the front page.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    entries = tuple(_parse_row(row) for row in soup.select(selectors.ROW))
-    return ParseResult(entries=entries)
+    rows = soup.select(selectors.ROW)
+    if len(rows) > MAX_ENTRIES:
+        logger.info("Found %d entry rows; keeping the first %d", len(rows), MAX_ENTRIES)
+
+    entries: list[Entry] = []
+    skipped = 0
+    for row in rows[:MAX_ENTRIES]:
+        try:
+            entries.append(_parse_row(row))
+        except ValueError as exc:
+            skipped += 1
+            _log_skipped_row(row, exc)
+
+    return ParseResult(entries=tuple(entries), skipped=skipped)
 
 
 def parse_points(text: str) -> int | None:
@@ -91,3 +117,13 @@ def _required(tag: Tag | None, field: str) -> Tag:
     if tag is None:
         raise ValueError(f"missing {field}")
     return tag
+
+
+def _log_skipped_row(row: Tag, reason: ValueError) -> None:
+    title = row.select_one(selectors.TITLE_LINK)
+    logger.warning(
+        "Skipped entry row id=%r title=%r: %r",
+        row.get("id"),
+        title.get_text() if title else None,
+        str(reason),
+    )
