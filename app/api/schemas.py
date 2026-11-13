@@ -39,6 +39,7 @@ class UsageRecordPublic(BaseModel):
     cache_status: UsageCacheStatus
     data_fetched_at: datetime | None
     """When the returned data was scraped (UTC); null if no data was returned."""
-    latency_ms: int
+    latency_ms: float
+    """Time spent handling the request, in milliseconds (microsecond resolution)."""
     status_code: int
     error: str | None

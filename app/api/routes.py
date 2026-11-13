@@ -32,7 +32,8 @@ async def _record_usage(
         result_count=result_count,
         cache_status=cache_status,
         data_fetched_at=data_fetched_at,
-        latency_ms=round((time.perf_counter() - started) * 1000),
+        # Microsecond resolution: cache hits take well under 1 ms.
+        latency_ms=round((time.perf_counter() - started) * 1000, 3),
         status_code=status_code,
         error=error,
     )

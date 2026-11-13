@@ -20,7 +20,7 @@ def _record(requested_at: datetime = START) -> UsageRecord:
         result_count=12,
         cache_status=UsageCacheStatus.HIT,
         data_fetched_at=START - timedelta(seconds=20),
-        latency_ms=7,
+        latency_ms=0.042,
         status_code=200,
         error=None,
     )

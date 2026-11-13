@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS usage (
     result_count    INTEGER NOT NULL,
     cache_status    TEXT    NOT NULL,
     data_fetched_at TEXT,
-    latency_ms      INTEGER NOT NULL,
+    latency_ms      REAL    NOT NULL,
     status_code     INTEGER NOT NULL,
     error           TEXT
 )
@@ -52,7 +52,7 @@ class UsageRecord:
     cache_status: UsageCacheStatus
     data_fetched_at: datetime | None
     """When the returned data was scraped; None if no data was returned."""
-    latency_ms: int
+    latency_ms: float
     status_code: int
     error: str | None
 
