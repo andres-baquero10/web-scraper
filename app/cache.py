@@ -18,7 +18,7 @@ Fetcher = Callable[[], Awaitable[Sequence[Entry]]]
 logger = logging.getLogger(__name__)
 
 
-def _utc_now() -> datetime:
+def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
@@ -49,7 +49,7 @@ class SnapshotCache:
     """
 
     def __init__(
-        self, fetcher: Fetcher, ttl_seconds: float, clock: Clock = _utc_now
+        self, fetcher: Fetcher, ttl_seconds: float, clock: Clock = utc_now
     ) -> None:
         self._fetcher = fetcher
         self._clock = clock
