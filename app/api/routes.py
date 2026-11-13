@@ -4,18 +4,31 @@ import asyncio
 import time
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.api.schemas import EntriesResponse, EntryPublic, UsageRecordPublic
 from app.cache import CacheStatus, Clock, NoDataError, SnapshotCache
 from app.filters import Filter, apply_filter
 from app.usage import UsageCacheStatus, UsageRecord, UsageRepository
 
+REQUEST_ID_HEADER = "X-Request-ID"
+"""Response header carrying the ID of the request's usage record."""
+
+_REQUEST_ID_DOC = {
+    REQUEST_ID_HEADER: {
+        "description": "Look up this request's usage record with "
+        "`GET /usage?request_id=<value>`",
+        "schema": {"type": "string", "format": "uuid"},
+    }
+}
+
 
 async def _record_usage(
     usage: UsageRepository,
     *,
+    request_id: str,
     requested_at: datetime,
     started: float,
     filter: Filter,
@@ -27,6 +40,7 @@ async def _record_usage(
 ) -> None:
     """Save one /entries request; ``started`` is a ``time.perf_counter()`` value."""
     rec = UsageRecord(
+        request_id=request_id,
         requested_at=requested_at,
         filter=filter,
         result_count=result_count,
@@ -52,19 +66,30 @@ def create_router(
         "/entries",
         response_model=EntriesResponse,
         responses={
-            503: {"description": "Hacker News is unavailable and nothing is cached"}
+            200: {"headers": _REQUEST_ID_DOC},
+            503: {
+                "description": "Hacker News is unavailable and nothing is cached",
+                "headers": _REQUEST_ID_DOC,
+            },
         },
     )
-    async def get_entries(filter: Filter = Filter.ALL) -> EntriesResponse:
+    async def get_entries(
+        response: Response, filter: Filter = Filter.ALL
+    ) -> EntriesResponse:
         """Front-page entries, filtered and ordered by ``filter``."""
         requested_at = clock()
         started = time.perf_counter()
+        # Generated here, not by the database, so the client gets an ID
+        # even when saving the usage record fails.
+        request_id = str(uuid4())
+        headers = {REQUEST_ID_HEADER: request_id}
 
         try:
             result = await cache.get()
         except NoDataError as exc:
             await _record_usage(
                 usage,
+                request_id=request_id,
                 requested_at=requested_at,
                 started=started,
                 filter=filter,
@@ -74,12 +99,15 @@ def create_router(
                 status_code=503,
                 error=str(exc),
             )
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=503, detail=str(exc), headers=headers
+            ) from exc
 
         snapshot = result.snapshot
         entries = apply_filter(snapshot.entries, filter)
         await _record_usage(
             usage,
+            request_id=request_id,
             requested_at=requested_at,
             started=started,
             filter=filter,
@@ -88,6 +116,7 @@ def create_router(
             data_fetched_at=snapshot.fetched_at,
             status_code=200,
         )
+        response.headers.update(headers)
         return EntriesResponse(
             fetched_at=snapshot.fetched_at,
             stale=result.status is CacheStatus.STALE,
@@ -99,11 +128,17 @@ def create_router(
     def get_usage(
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
+        request_id: Annotated[
+            UUID | None,
+            Query(description="Only the record with this X-Request-ID value"),
+        ] = None,
     ) -> list[UsageRecordPublic]:
         """Usage records for /entries requests, newest first."""
+        # str(UUID) is canonical, so any accepted spelling matches the stored one.
+        rid = None if request_id is None else str(request_id)
         return [
             UsageRecordPublic.model_validate(rec)
-            for rec in usage.recent(limit=limit, offset=offset)
+            for rec in usage.recent(limit=limit, offset=offset, request_id=rid)
         ]
 
     return router

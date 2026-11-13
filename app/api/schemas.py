@@ -32,6 +32,8 @@ class UsageRecordPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    request_id: str
+    """Matches the X-Request-ID header of the /entries response."""
     requested_at: datetime
     """When the /entries request arrived (UTC)."""
     filter: Filter

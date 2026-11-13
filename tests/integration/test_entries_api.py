@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -84,6 +85,7 @@ def test_request_records_a_usage_row(client: TestClient, db_path: Path) -> None:
     response = client.get("/entries", params={"filter": "short"})
 
     [row] = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert row.request_id == response.headers["X-Request-ID"]
     assert row.requested_at == START
     assert row.filter is Filter.SHORT
     assert row.result_count == len(response.json()["entries"])
@@ -137,3 +139,34 @@ def test_broken_usage_database_still_returns_200(
     assert response.status_code == 200
     assert len(response.json()["entries"]) == 30
     assert "Failed to save usage record" in caplog.text
+
+
+def test_each_request_gets_its_own_request_id(client: TestClient) -> None:
+    ids = [client.get("/entries").headers["X-Request-ID"] for _ in range(2)]
+
+    assert ids[0] != ids[1]
+    assert all(str(UUID(rid)) == rid for rid in ids)
+
+
+def test_request_id_finds_the_usage_row(client: TestClient) -> None:
+    client.get("/entries", params={"filter": "long"})
+    response = client.get("/entries", params={"filter": "short"})
+    request_id = response.headers["X-Request-ID"]
+
+    [row] = client.get("/usage", params={"request_id": request_id}).json()
+
+    assert row["request_id"] == request_id
+    assert row["filter"] == "short"
+
+
+def test_503_carries_a_request_id_for_its_usage_row(
+    client: TestClient, db_path: Path, fetcher: FakePageFetcher
+) -> None:
+    fetcher.error = FetchError("HN returned 503")
+
+    response = client.get("/entries")
+
+    assert response.status_code == 503
+    [row] = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert row.request_id == response.headers["X-Request-ID"]
+    assert row.status_code == 503

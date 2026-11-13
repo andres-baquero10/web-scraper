@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id      TEXT    NOT NULL UNIQUE,
     requested_at    TEXT    NOT NULL,
     filter          TEXT    NOT NULL,
     result_count    INTEGER NOT NULL,
@@ -27,9 +28,10 @@ CREATE TABLE IF NOT EXISTS usage (
 """
 
 _COLUMNS = (
-    "requested_at, filter, result_count, cache_status, "
+    "request_id, requested_at, filter, result_count, cache_status, "
     "data_fetched_at, latency_ms, status_code, error"
 )
+_PLACEHOLDERS = ", ".join("?" * len(_COLUMNS.split(",")))
 
 
 class UsageCacheStatus(StrEnum):
@@ -46,6 +48,8 @@ class UsageCacheStatus(StrEnum):
 class UsageRecord:
     """One /entries request."""
 
+    request_id: str
+    """Unique ID, also returned to the client in the X-Request-ID header."""
     requested_at: datetime
     filter: Filter
     result_count: int
@@ -87,14 +91,24 @@ class UsageRepository:
         return sqlite3.connect(self._db_path)
 
     def create_schema(self) -> None:
-        """Create the usage table if it doesn't exist; safe to call repeatedly."""
+        """Create the usage table if it doesn't exist; safe to call repeatedly.
+
+        Raises RuntimeError if the file holds a table from an older schema.
+        """
         with closing(self._connect()) as conn, conn:
             conn.execute(_SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(usage)")}
+        if "request_id" not in columns:
+            raise RuntimeError(
+                f"{self._db_path} was created by an older version and has no "
+                "request_id column; delete it and restart"
+            )
 
     def record(self, rec: UsageRecord) -> None:
         """Save one record. Never raises: a usage failure must not fail a request."""
         try:
             values = (
+                rec.request_id,
                 _to_text(rec.requested_at),
                 rec.filter.value,
                 rec.result_count,
@@ -106,23 +120,32 @@ class UsageRepository:
             )
             with closing(self._connect()) as conn, conn:
                 conn.execute(
-                    f"INSERT INTO usage ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    f"INSERT INTO usage ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
                     values,
                 )
         except Exception:
             logger.exception("Failed to save usage record")
 
-    def recent(self, limit: int, offset: int) -> list[StoredUsageRecord]:
-        """Return records newest first. Storage errors are raised."""
+    def recent(
+        self, limit: int, offset: int, request_id: str | None = None
+    ) -> list[StoredUsageRecord]:
+        """Return records newest first, optionally only the one with ``request_id``.
+
+        Storage errors are raised.
+        """
+        where, params = ("", [])
+        if request_id is not None:
+            where, params = "WHERE request_id = ? ", [request_id]
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                f"SELECT id, {_COLUMNS} FROM usage "
+                f"SELECT id, {_COLUMNS} FROM usage {where}"
                 "ORDER BY requested_at DESC, id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                (*params, limit, offset),
             ).fetchall()
         return [
             StoredUsageRecord(
                 id=row_id,
+                request_id=request_id,
                 requested_at=datetime.fromisoformat(requested_at),
                 filter=Filter(filter_),
                 result_count=result_count,
@@ -134,6 +157,7 @@ class UsageRepository:
             )
             for (
                 row_id,
+                request_id,
                 requested_at,
                 filter_,
                 result_count,

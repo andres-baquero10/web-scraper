@@ -4,6 +4,7 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +16,7 @@ START = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
 def _record(requested_at: datetime = START) -> UsageRecord:
     return UsageRecord(
+        request_id=str(uuid4()),
         requested_at=requested_at,
         filter=Filter.LONG,
         result_count=12,
@@ -109,3 +111,31 @@ def test_create_schema_is_idempotent(repo: UsageRepository) -> None:
     repo.record(_record())
 
     assert len(repo.recent(limit=10, offset=0)) == 1
+
+
+def test_recent_can_select_one_request_id(repo: UsageRepository) -> None:
+    records = [_record(START + timedelta(minutes=m)) for m in range(3)]
+    for record in records:
+        repo.record(record)
+
+    [stored] = repo.recent(limit=10, offset=0, request_id=records[1].request_id)
+
+    assert stored == StoredUsageRecord(id=stored.id, **vars(records[1]))
+    assert repo.recent(limit=10, offset=0, request_id=str(uuid4())) == []
+
+
+def test_duplicate_request_id_is_not_stored(repo: UsageRepository) -> None:
+    record = _record()
+    repo.record(record)
+    repo.record(replace(record, requested_at=START + timedelta(minutes=1)))
+
+    assert len(repo.recent(limit=10, offset=0)) == 1
+
+
+def test_create_schema_rejects_a_table_without_request_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.db"
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("CREATE TABLE usage (id INTEGER PRIMARY KEY)")
+
+    with pytest.raises(RuntimeError, match="delete it and restart"):
+        UsageRepository(db_path).create_schema()

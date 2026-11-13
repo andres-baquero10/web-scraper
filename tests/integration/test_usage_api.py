@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,12 +10,17 @@ from app.usage import UsageCacheStatus, UsageRecord, UsageRepository
 from tests.integration.conftest import START
 
 
+def _request_id(i: int) -> str:
+    return str(UUID(int=i))
+
+
 def _seed(db_path: Path, count: int) -> None:
     """Write ``count`` rows; row i is requested i minutes after START."""
     repo = UsageRepository(db_path)
     for i in range(count):
         repo.record(
             UsageRecord(
+                request_id=_request_id(i),
                 requested_at=START + timedelta(minutes=i),
                 filter=Filter.SHORT,
                 result_count=i,
@@ -42,6 +48,7 @@ def test_returns_records_newest_first(client: TestClient, db_path: Path) -> None
     newest = body[0]
     assert set(newest) == {
         "id",
+        "request_id",
         "requested_at",
         "filter",
         "result_count",
@@ -51,6 +58,7 @@ def test_returns_records_newest_first(client: TestClient, db_path: Path) -> None
         "status_code",
         "error",
     }
+    assert newest["request_id"] == _request_id(2)
     assert newest["filter"] == "short"
     assert newest["cache_status"] == "hit"
     assert datetime.fromisoformat(newest["requested_at"]) == START + timedelta(
@@ -78,10 +86,36 @@ def test_offset_pages_back_through_older_records(
     assert _counts(body) == [3, 2]
 
 
-@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 501}, {"offset": -1}])
-def test_out_of_range_paging_gives_422(
-    client: TestClient, params: dict[str, int]
+def test_request_id_selects_one_record(client: TestClient, db_path: Path) -> None:
+    _seed(db_path, 3)
+
+    body = client.get("/usage", params={"request_id": _request_id(1)}).json()
+
+    assert _counts(body) == [1]
+
+
+def test_request_id_matches_any_uuid_spelling(
+    client: TestClient, db_path: Path
 ) -> None:
+    _seed(db_path, 3)
+    upper_no_hyphens = UUID(_request_id(1)).hex.upper()
+
+    body = client.get("/usage", params={"request_id": upper_no_hyphens}).json()
+
+    assert _counts(body) == [1]
+
+
+def test_unknown_request_id_gives_empty_list(client: TestClient, db_path: Path) -> None:
+    _seed(db_path, 3)
+
+    assert client.get("/usage", params={"request_id": _request_id(99)}).json() == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"limit": 0}, {"limit": 501}, {"offset": -1}, {"request_id": "not-a-uuid"}],
+)
+def test_invalid_query_gives_422(client: TestClient, params: dict[str, object]) -> None:
     assert client.get("/usage", params=params).status_code == 422
 
 
