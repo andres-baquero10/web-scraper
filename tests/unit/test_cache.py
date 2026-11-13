@@ -1,5 +1,7 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
+import anyio
 import pytest
 
 from app.cache import CacheStatus, NoDataError, SnapshotCache
@@ -29,15 +31,24 @@ class FakeClock:
 
 
 class FakeFetcher:
-    """Returns ``count`` entries, or raises ``error`` when it is set."""
+    """Returns ``count`` entries, or raises ``error`` when it is set.
+
+    When ``gate`` is set, each fetch signals ``started`` and then blocks
+    until the gate opens, so tests control exactly when it finishes.
+    """
 
     def __init__(self, count: int = 30) -> None:
         self.count = count
         self.error: Exception | None = None
         self.calls = 0
+        self.gate: asyncio.Event | None = None
+        self.started = asyncio.Event()
 
     async def __call__(self) -> list[Entry]:
         self.calls += 1
+        self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
         if self.error is not None:
             raise self.error
         return _entries(self.count)
@@ -211,3 +222,66 @@ async def test_unexpected_error_propagates_and_later_calls_serve_stale(
 
     assert result.status is CacheStatus.STALE
     assert fetcher.calls == 2
+
+
+CONCURRENT_CALLS = 50
+
+
+@pytest.mark.anyio
+async def test_concurrent_calls_on_empty_cache_share_one_fetch(
+    cache: SnapshotCache, fetcher: FakeFetcher
+) -> None:
+    fetcher.gate = asyncio.Event()
+    calls = [asyncio.create_task(cache.get()) for _ in range(CONCURRENT_CALLS)]
+    await fetcher.started.wait()
+    assert not any(call.done() for call in calls)
+
+    fetcher.gate.set()
+    results = await asyncio.gather(*calls)
+
+    assert fetcher.calls == 1
+    assert all(result.status is CacheStatus.MISS for result in results)
+    assert all(result.snapshot is results[0].snapshot for result in results)
+
+
+@pytest.mark.anyio
+async def test_concurrent_calls_on_empty_cache_share_one_failure(
+    cache: SnapshotCache, fetcher: FakeFetcher
+) -> None:
+    fetcher.gate = asyncio.Event()
+    fetcher.error = FetchError("HN returned 503")
+    calls = [asyncio.create_task(cache.get()) for _ in range(CONCURRENT_CALLS)]
+    await fetcher.started.wait()
+
+    fetcher.gate.set()
+    results = await asyncio.gather(*calls, return_exceptions=True)
+
+    assert fetcher.calls == 1
+    assert all(isinstance(result, NoDataError) for result in results)
+
+
+@pytest.mark.anyio
+async def test_calls_during_a_refresh_get_the_cached_snapshot_without_waiting(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    previous = await cache.get()
+    clock.advance(TTL)
+    fetcher.started.clear()
+    fetcher.gate = asyncio.Event()
+    trigger = asyncio.create_task(cache.get())
+    await fetcher.started.wait()
+
+    with anyio.fail_after(1):
+        during = [await cache.get() for _ in range(CONCURRENT_CALLS - 1)]
+
+    assert all(result.status is CacheStatus.HIT for result in during)
+    assert all(result.snapshot is previous.snapshot for result in during)
+    assert not trigger.done()
+
+    fetcher.gate.set()
+    refreshed = await trigger
+
+    assert fetcher.calls == 2
+    assert refreshed.status is CacheStatus.MISS
+    assert refreshed.snapshot.fetched_at == START + timedelta(seconds=TTL)
+    assert (await cache.get()).snapshot is refreshed.snapshot
