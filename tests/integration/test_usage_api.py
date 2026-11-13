@@ -113,7 +113,13 @@ def test_unknown_request_id_gives_empty_list(client: TestClient, db_path: Path) 
 
 @pytest.mark.parametrize(
     "params",
-    [{"limit": 0}, {"limit": 501}, {"offset": -1}, {"request_id": "not-a-uuid"}],
+    [
+        {"limit": 0},
+        {"limit": 501},
+        {"offset": -1},
+        {"offset": 1_000_001},
+        {"request_id": "not-a-uuid"},
+    ],
 )
 def test_invalid_query_gives_422(client: TestClient, params: dict[str, object]) -> None:
     assert client.get("/usage", params=params).status_code == 422

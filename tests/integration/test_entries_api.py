@@ -170,3 +170,18 @@ def test_503_carries_a_request_id_for_its_usage_row(
     [row] = UsageRepository(db_path).recent(limit=10, offset=0)
     assert row.request_id == response.headers["X-Request-ID"]
     assert row.status_code == 503
+
+
+def test_unexpected_error_gives_500_with_a_usage_row(
+    client: TestClient, db_path: Path, fetcher: FakePageFetcher
+) -> None:
+    fetcher.error = RuntimeError("parser bug")
+
+    response = client.get("/entries")
+
+    assert response.status_code == 500
+    [row] = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert row.request_id == response.headers["X-Request-ID"]
+    assert row.status_code == 500
+    assert row.cache_status is UsageCacheStatus.EMPTY
+    assert row.error == "unexpected error: RuntimeError"

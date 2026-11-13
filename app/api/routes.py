@@ -1,6 +1,7 @@
 """HTTP endpoints."""
 
 import asyncio
+import logging
 import time
 from datetime import datetime
 from typing import Annotated
@@ -12,6 +13,8 @@ from app.api.schemas import EntriesResponse, EntryPublic, UsageRecordPublic
 from app.cache import CacheStatus, Clock, NoDataError, SnapshotCache
 from app.filters import Filter, apply_filter
 from app.usage import UsageCacheStatus, UsageRecord, UsageRepository
+
+logger = logging.getLogger(__name__)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 """Response header carrying the ID of the request's usage record."""
@@ -86,7 +89,15 @@ def create_router(
 
         try:
             result = await cache.get()
-        except NoDataError as exc:
+        except Exception as exc:
+            if isinstance(exc, NoDataError):
+                status_code, detail, error = 503, str(exc), str(exc)
+            else:
+                # A bug (e.g. in the parser) must still leave a usage row and
+                # give the client a request ID to look it up with.
+                logger.exception("Unexpected error serving /entries")
+                status_code, detail = 500, "Internal server error"
+                error = f"unexpected error: {type(exc).__name__}"
             await _record_usage(
                 usage,
                 request_id=request_id,
@@ -96,11 +107,11 @@ def create_router(
                 result_count=0,
                 cache_status=UsageCacheStatus.EMPTY,
                 data_fetched_at=None,
-                status_code=503,
-                error=str(exc),
+                status_code=status_code,
+                error=error,
             )
             raise HTTPException(
-                status_code=503, detail=str(exc), headers=headers
+                status_code=status_code, detail=detail, headers=headers
             ) from exc
 
         snapshot = result.snapshot
@@ -127,7 +138,7 @@ def create_router(
     @router.get("/usage", response_model=list[UsageRecordPublic])
     def get_usage(
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
-        offset: Annotated[int, Query(ge=0)] = 0,
+        offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
         request_id: Annotated[
             UUID | None,
             Query(description="Only the record with this X-Request-ID value"),

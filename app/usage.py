@@ -41,7 +41,7 @@ class UsageCacheStatus(StrEnum):
     MISS = "miss"
     STALE = "stale"
     EMPTY = "empty"
-    """Nothing was cached, so the request got a 503."""
+    """No data was served: nothing cached (503) or an unexpected error (500)."""
 
 
 @dataclass(frozen=True)
