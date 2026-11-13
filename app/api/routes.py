@@ -3,10 +3,11 @@
 import asyncio
 import time
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
-from app.api.schemas import EntriesResponse, EntryPublic
+from app.api.schemas import EntriesResponse, EntryPublic, UsageRecordPublic
 from app.cache import CacheStatus, Clock, NoDataError, SnapshotCache
 from app.filters import Filter, apply_filter
 from app.usage import UsageCacheStatus, UsageRecord, UsageRepository
@@ -92,5 +93,16 @@ def create_router(
             complete=snapshot.complete,
             entries=[EntryPublic.model_validate(entry) for entry in entries],
         )
+
+    @router.get("/usage", response_model=list[UsageRecordPublic])
+    def get_usage(
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> list[UsageRecordPublic]:
+        """Usage records for /entries requests, newest first."""
+        return [
+            UsageRecordPublic.model_validate(rec)
+            for rec in usage.recent(limit=limit, offset=offset)
+        ]
 
     return router
