@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.cache import CacheStatus, SnapshotCache
+from app.cache import CacheStatus, NoDataError, SnapshotCache
 from app.models import Entry
+from app.scraping.fetcher import FetchError
 
 TTL = 60.0
 START = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -28,12 +29,17 @@ class FakeClock:
 
 
 class FakeFetcher:
+    """Returns ``count`` entries, or raises ``error`` when it is set."""
+
     def __init__(self, count: int = 30) -> None:
         self.count = count
+        self.error: Exception | None = None
         self.calls = 0
 
     async def __call__(self) -> list[Entry]:
         self.calls += 1
+        if self.error is not None:
+            raise self.error
         return _entries(self.count)
 
 
@@ -109,3 +115,99 @@ async def test_default_clock_stamps_snapshots_in_utc(fetcher: FakeFetcher) -> No
     result = await SnapshotCache(fetcher, ttl_seconds=TTL).get()
 
     assert result.snapshot.fetched_at.tzinfo is UTC
+
+
+@pytest.mark.anyio
+async def test_failure_with_cached_data_serves_it_as_stale(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    first = await cache.get()
+    clock.advance(TTL)
+    fetcher.error = FetchError("HN returned 503")
+    result = await cache.get()
+
+    assert result.status is CacheStatus.STALE
+    assert result.snapshot is first.snapshot
+    assert result.snapshot.fetched_at == START
+
+
+@pytest.mark.anyio
+async def test_failure_with_nothing_cached_raises_no_data(
+    cache: SnapshotCache, fetcher: FakeFetcher
+) -> None:
+    fetcher.error = FetchError("HN returned 503")
+
+    with pytest.raises(NoDataError, match="HN returned 503"):
+        await cache.get()
+
+
+@pytest.mark.anyio
+async def test_after_failure_waits_a_full_ttl_before_fetching_again(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    await cache.get()
+    clock.advance(TTL)
+    fetcher.error = FetchError("timeout")
+    await cache.get()
+
+    clock.advance(TTL - 1)
+    within_ttl = await cache.get()
+    assert within_ttl.status is CacheStatus.STALE
+    assert fetcher.calls == 2
+
+    fetcher.error = None
+    clock.advance(1)
+    recovered = await cache.get()
+    assert recovered.status is CacheStatus.MISS
+    assert fetcher.calls == 3
+    assert (await cache.get()).status is CacheStatus.HIT
+
+
+@pytest.mark.anyio
+async def test_failure_with_nothing_cached_is_not_retried_within_ttl(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    fetcher.error = FetchError("timeout")
+    with pytest.raises(NoDataError):
+        await cache.get()
+
+    clock.advance(TTL - 1)
+    with pytest.raises(NoDataError):
+        await cache.get()
+    assert fetcher.calls == 1
+
+
+@pytest.mark.anyio
+async def test_zero_entries_counts_as_a_failure(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    fetcher.count = 0
+    with pytest.raises(NoDataError, match="no entries"):
+        await cache.get()
+
+    fetcher.count = 30
+    clock.advance(TTL)
+    first = await cache.get()
+    fetcher.count = 0
+    clock.advance(TTL)
+    result = await cache.get()
+
+    assert result.status is CacheStatus.STALE
+    assert result.snapshot is first.snapshot
+
+
+@pytest.mark.anyio
+async def test_unexpected_error_propagates_and_later_calls_serve_stale(
+    cache: SnapshotCache, fetcher: FakeFetcher, clock: FakeClock
+) -> None:
+    await cache.get()
+    clock.advance(TTL)
+    fetcher.error = RuntimeError("parser bug")
+    with pytest.raises(RuntimeError):
+        await cache.get()
+
+    clock.advance(1)
+    result = await cache.get()
+
+    assert result.status is CacheStatus.STALE
+    assert fetcher.calls == 2
