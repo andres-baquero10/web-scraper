@@ -1,3 +1,4 @@
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,7 @@ from app.filters import Filter, apply_filter
 from app.main import create_app
 from app.scraping.fetcher import FetchError
 from app.scraping.parser import parse
-from app.usage import UsageRepository
+from app.usage import UsageCacheStatus, UsageRepository
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "front_page.html"
 HTML = FIXTURE.read_text(encoding="utf-8")
@@ -132,3 +133,62 @@ def test_failure_with_nothing_cached_gives_503(
 
 def test_startup_creates_usage_schema(client: TestClient, db_path: Path) -> None:
     assert UsageRepository(db_path).recent(limit=1, offset=0) == []
+
+
+def test_request_records_a_usage_row(client: TestClient, db_path: Path) -> None:
+    response = client.get("/entries", params={"filter": "short"})
+
+    [row] = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert row.requested_at == START
+    assert row.filter is Filter.SHORT
+    assert row.result_count == len(response.json()["entries"])
+    assert row.cache_status is UsageCacheStatus.MISS
+    assert row.data_fetched_at == START
+    assert row.latency_ms >= 0
+    assert row.status_code == 200
+    assert row.error is None
+
+
+def test_usage_cache_status_follows_the_cache(
+    client: TestClient, db_path: Path, fetcher: FakePageFetcher, clock: FakeClock
+) -> None:
+    client.get("/entries")  # miss
+    client.get("/entries")  # hit
+    clock.advance(TTL)
+    fetcher.error = FetchError("HN returned 503")
+    client.get("/entries")  # stale
+
+    rows = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert [r.cache_status for r in rows] == [
+        UsageCacheStatus.STALE,
+        UsageCacheStatus.HIT,
+        UsageCacheStatus.MISS,
+    ]
+
+
+def test_503_is_recorded_as_empty_with_error(
+    client: TestClient, db_path: Path, fetcher: FakePageFetcher
+) -> None:
+    fetcher.error = FetchError("HN returned 503")
+
+    client.get("/entries")
+
+    [row] = UsageRepository(db_path).recent(limit=10, offset=0)
+    assert row.cache_status is UsageCacheStatus.EMPTY
+    assert row.status_code == 503
+    assert row.result_count == 0
+    assert row.data_fetched_at is None
+    assert row.error
+
+
+def test_broken_usage_database_still_returns_200(
+    client: TestClient, db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE usage")
+
+    response = client.get("/entries")
+
+    assert response.status_code == 200
+    assert len(response.json()["entries"]) == 30
+    assert "Failed to save usage record" in caplog.text

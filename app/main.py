@@ -41,9 +41,8 @@ def create_app(
         http_client = httpx.AsyncClient()
         fetcher = HNFetcher(http_client, settings.fetch_timeout_seconds).fetch
 
-    cache = SnapshotCache(
-        _scraper(fetcher), settings.cache_ttl_seconds, clock or utc_now
-    )
+    clock = clock or utc_now
+    cache = SnapshotCache(_scraper(fetcher), settings.cache_ttl_seconds, clock)
     usage = UsageRepository(settings.db_path)
 
     @asynccontextmanager
@@ -54,5 +53,5 @@ def create_app(
             await http_client.aclose()
 
     app = FastAPI(title="Hacker News scraper", lifespan=lifespan)
-    app.include_router(create_router(cache))
+    app.include_router(create_router(cache, usage, clock))
     return app
